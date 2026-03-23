@@ -77,7 +77,11 @@ export default function App() {
     setIsGeneratingScript(true);
     setError(null);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("API Key Gemini tidak ditemukan.");
+      }
+      const ai = new GoogleGenAI({ apiKey });
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: `Buatlah 3 variasi script video TikTok affiliate yang agak panjang (durasi sekitar 40 detik per script, sekitar 80-100 kata).
@@ -98,11 +102,14 @@ export default function App() {
       });
       
       const scripts = JSON.parse(response.text || "[]");
+      if (!Array.isArray(scripts) || scripts.length === 0) {
+        throw new Error("Format script yang dihasilkan tidak valid.");
+      }
       setTtsScripts(scripts);
       setSelectedScriptIndex(0);
-    } catch (err) {
-      console.error(err);
-      setError("Gagal membuat script otomatis.");
+    } catch (err: any) {
+      console.error("Script generation error:", err);
+      setError("Gagal membuat script otomatis: " + (err.message || "Kesalahan teknis"));
     } finally {
       setIsGeneratingScript(false);
     }
@@ -121,7 +128,11 @@ export default function App() {
     setGeneratedAudio(null);
     
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("API Key Gemini tidak ditemukan di environment.");
+      }
+      const ai = new GoogleGenAI({ apiKey });
       
       // 1. Generate Images
       const getPrompt = (t: typeof theme, c: typeof color) => `A high-quality, realistic photograph of ${BASE_CHARACTER_DESCRIPTION}. 
@@ -151,28 +162,45 @@ export default function App() {
 
       const imageResults: string[] = [];
 
-      for (const v of variations) {
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash-image',
-          contents: {
-            parts: [{ text: getPrompt(v.t, v.c) }],
-          },
-          config: {
-            imageConfig: {
-              aspectRatio: "9:16",
+      for (let i = 0; i < variations.length; i++) {
+        const v = variations[i];
+        try {
+          const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash-image',
+            contents: {
+              parts: [{ text: getPrompt(v.t, v.c) }],
             },
-          },
-        });
+            config: {
+              imageConfig: {
+                aspectRatio: "9:16",
+              },
+            },
+          });
 
-        let found = false;
-        for (const part of response.candidates?.[0]?.content?.parts || []) {
-          if (part.inlineData) {
-            imageResults.push(`data:image/png;base64,${part.inlineData.data}`);
-            found = true;
-            break;
+          let found = false;
+          for (const part of response.candidates?.[0]?.content?.parts || []) {
+            if (part.inlineData) {
+              imageResults.push(`data:image/png;base64,${part.inlineData.data}`);
+              found = true;
+              break;
+            }
           }
+          if (!found) {
+            // Check if there's a safety block
+            const safetyRating = response.candidates?.[0]?.safetyRatings;
+            console.warn(`Safety ratings for variation ${i + 1}:`, safetyRating);
+            throw new Error(`Gagal menghasilkan gambar variasi ${i + 1}. Kemungkinan terblokir filter keamanan atau model sedang sibuk.`);
+          }
+        } catch (imgErr: any) {
+          console.error(`Error generating image ${i + 1}:`, imgErr);
+          if (imgErr.message?.includes("quota") || imgErr.message?.includes("429")) {
+            throw new Error("Batas penggunaan (quota) tercapai. Silakan coba lagi dalam beberapa menit.");
+          }
+          if (imgErr.message?.includes("API key not valid")) {
+            throw new Error("API Key tidak valid. Silakan periksa pengaturan API Key Anda.");
+          }
+          throw new Error(`Gagal pada Gambar ${i + 1}: ${imgErr.message || "Kesalahan tidak diketahui"}`);
         }
-        if (!found) throw new Error("Gagal menghasilkan salah satu gambar.");
       }
 
       setGeneratedImages(imageResults);
@@ -180,28 +208,36 @@ export default function App() {
       // 2. Generate TTS using the selected script
       const activeScript = ttsScripts[selectedScriptIndex];
       if (activeScript) {
-        const ttsResponse = await ai.models.generateContent({
-          model: "gemini-2.5-flash-preview-tts",
-          contents: [{ parts: [{ text: `Katakan dengan nada ceria dan persuasif: ${activeScript}` }] }],
-          config: {
-            responseModalities: [Modality.AUDIO],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: { voiceName: 'Puck' },
+        try {
+          const ttsResponse = await ai.models.generateContent({
+            model: "gemini-2.5-flash-preview-tts",
+            contents: [{ parts: [{ text: `Katakan dengan nada ceria dan persuasif: ${activeScript}` }] }],
+            config: {
+              responseModalities: [Modality.AUDIO],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: 'Puck' },
+                },
               },
             },
-          },
-        });
+          });
 
-        const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (base64Audio) {
-          setGeneratedAudio(`data:audio/mp3;base64,${base64Audio}`);
+          const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+          if (base64Audio) {
+            setGeneratedAudio(`data:audio/mp3;base64,${base64Audio}`);
+          } else {
+            console.warn("TTS generated but no audio data found.");
+            setError("Gambar berhasil dibuat, tetapi data suara TTS kosong.");
+          }
+        } catch (ttsErr: any) {
+          console.error("Error generating TTS:", ttsErr);
+          setError("Gambar berhasil dibuat, tetapi gagal menghasilkan suara TTS: " + (ttsErr.message || "Kesalahan teknis"));
         }
       }
 
-    } catch (err) {
-      console.error(err);
-      setError("Terjadi kesalahan saat memproses. Pastikan koneksi internet stabil.");
+    } catch (err: any) {
+      console.error("Global processing error:", err);
+      setError(err.message || "Terjadi kesalahan sistem. Silakan coba lagi nanti.");
     } finally {
       setIsGenerating(false);
     }
